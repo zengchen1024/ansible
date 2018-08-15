@@ -8,6 +8,7 @@
 # https://opensource.org/licenses/BSD-2-Clause)
 
 try:
+    import logging
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -75,7 +76,7 @@ class HwcSession(object):
         self.product = product
         self._validate()
         self._session = self._credentials()
-        self._adapter = Adapter(self._session)
+        self._adapter = Adapter(self._session, logger=self._init_log(log_file))
         self._endpoints = {}
         self._project_id = ""
 
@@ -171,6 +172,24 @@ class HwcSession(object):
             'Accept': 'application/json',
         }
 
+    def _init_log(self):
+        log_file = self.module.params['log_file']
+        if not log_file:
+            return None
+        try:
+            log = logging.getLogger()
+            log.setLevel(logging.DEBUG)
+
+            fh = logging.FileHandler(log_file, mode='a')
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: "
+                "%(message)s"))
+            log.addHandler(fh)
+            return log
+        except Exception as ex:
+            self.module.fail_json(msg="Init module log failed, err=%s" % ex)
+
 
 class HwcModule(AnsibleModule):
     def __init__(self, *args, **kwargs):
@@ -201,6 +220,10 @@ class HwcModule(AnsibleModule):
                 region=dict(
                     required=True, type='str',
                     fallback=(env_fallback, ['REGION']),
+                ),
+                log_file=dict(
+                    type='str',
+                    fallback=(env_fallback, ['LOG_FILE']),
                 ),
                 timeouts=dict(type='dict', options=dict(
                     create=dict(default='10m', type='str'),

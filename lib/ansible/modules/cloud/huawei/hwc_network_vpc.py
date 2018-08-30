@@ -34,7 +34,7 @@ DOCUMENTATION = '''
 module: hwc_network_vpc
 description:
     - Represents an vpc resource.
-short_description: Creates a Huawei Cloud VPC
+short_description: Creates a resource of VPC in Huawei Cloud
 version_added: 2.7
 author: Huawei Inc. (@huaweicloud)
 requirements:
@@ -44,7 +44,7 @@ requirements:
 options:
     state:
         description:
-            - Whether the given object should exist in GCP
+            - Whether the given object should exist in Huawei Cloud.
         choices: ['present', 'absent']
         default: 'present'
     name:
@@ -67,7 +67,7 @@ EXAMPLES = '''
       domain_name: "{{ domain_name }}"
       project_name: "{{ project_name }}"
       region: "{{ region }}"
-      name: "vpc_1"
+      name: "ansible_network_vpc_test"
       cidr: "192.168.100.0/24"
       state: present
 '''
@@ -147,25 +147,19 @@ def main():
 
     state = module.params['state']
 
-    if (not module.params.get("id")) and module.params.get("name"):
-        module.params['id'] = get_id_by_name(session)
+    if not module.params.get("id"):
+        module.params['id'] = get_resource_id(session)
 
-    fetch = None
-    link = self_link(session)
-    # the link will include Nones if required format parameters are missed
-    if not re.search('/None/|/None$', link):
-        fetch = fetch_resource(session, link)
-        if fetch:
-            fetch = fetch.get('vpc')
+    fetch = get_resource(session)
     changed = False
 
     if fetch:
         if state == 'present':
-            expect = _get_editable_properties(module)
+            expect = _get_resource_editable_properties(module)
             current_state = response_to_hash(module, fetch)
             if is_different(expect, current_state):
                 fetch = update(session, self_link(session), [200])
-                fetch = response_to_hash(module, fetch.get('vpc'))
+                fetch = response_to_hash(module, fetch)
                 changed = True
             else:
                 fetch = current_state
@@ -176,7 +170,7 @@ def main():
     else:
         if state == 'present':
             fetch = create(session, collection(session), [200])
-            fetch = response_to_hash(module, fetch.get('vpc'))
+            fetch = response_to_hash(module, fetch)
             changed = True
         else:
             fetch = {}
@@ -192,10 +186,11 @@ def create(session, link, success_codes=None):
     module = session.module
     r = return_if_object(module, session.post(link, resource_to_create(module)), success_codes)
 
-    wait_done = wait_for_operation(session, 'create', r)
-
-    url = resource_get_url(session, wait_done)
-    return fetch_resource(session, url)
+    complete_states = ['OK']
+    allowed_states = ['CREATING', 'DONW', 'OK']
+    timeout = 60 * int(module.params['timeouts']['create'].rstrip('m'))
+    r = wait_for_operation(session, r, timeout, complete_states, allowed_states)
+    return r.get('vpc')
 
 
 def update(session, link, success_codes=None):
@@ -204,10 +199,11 @@ def update(session, link, success_codes=None):
     module = session.module
     r = return_if_object(module, session.put(link, resource_to_update(module)), success_codes)
 
-    wait_done = wait_for_operation(session, 'update', r)
-
-    url = resource_get_url(session, wait_done)
-    return fetch_resource(session, url)
+    complete_states = ['OK']
+    allowed_states = ['PENDING_UPDATE', 'DONW', 'OK']
+    timeout = 60 * int(module.params['timeouts']['update'].rstrip('m'))
+    r = wait_for_operation(session, r, timeout, complete_states, allowed_states)
+    return r.get('vpc')
 
 
 def delete(session, link, success_codes=None):
@@ -215,7 +211,8 @@ def delete(session, link, success_codes=None):
         success_codes = [202, 204]
     return_if_object(session.module, session.delete(link), success_codes, False)
 
-    wait_for_delete(session, link)
+    timeout = 60 * int(session.module.params['timeouts']['delete'].rstrip('m'))
+    wait_for_delete(session, link, timeout)
 
 
 def fetch_resource(session, link, success_codes=None):
@@ -224,61 +221,51 @@ def fetch_resource(session, link, success_codes=None):
     return return_if_object(session.module, session.get(link), success_codes)
 
 
+def get_resource(session):
+    link = self_link(session)
+    # the link will include Nones if required format parameters are missed
+    if re.search('/None/|/None$', link):
+        return None
+
+    fetch = fetch_resource(session, link)
+    if not fetch:
+        return fetch
+    return fetch.get('vpc')
+
+
 def link_wrapper(f):
-    def _wrapper(module, *args, **kwargs):
+    def _wrapper(session, *args, **kwargs):
         try:
-            return f(module, *args, **kwargs)
+            return f(session, *args, **kwargs)
         except KeyError as ex:
-            module.fail_json(
+            session.module.fail_json(
                 msg="Mapping keys(%s) are not found in generating link" % ex)
 
     return _wrapper
 
 
-def get_id_by_name(session):
+def get_resource_id(session):
     module = session.module
-    name = module.params.get("name")
     link = list_link(session, {'limit': 10, 'marker': '{marker}'})
-    not_format_keys = re.findall("={marker}", link)
-    none_values = re.findall("=None", link)
-
-    if not (not_format_keys or none_values):
-        r = fetch_resource(session, link)
+    p = {'marker': ''}
+    v = module.params.get('name')
+    ids = set()
+    while True:
+        r = fetch_resource(session, link.format(**p))
         if r is None:
-            return ""
+            break
         r = r.get('vpcs', [])
-        ids = [
-            i.get('id') for i in r if i.get('name', '') == name
-        ]
-        if not ids:
-            return ""
-        elif len(ids) == 1:
-            return ids[0]
-        else:
-            module.fail_json(msg="Multiple resources with same name are found")
-    elif none_values:
-        module.fail_json(
-            msg="Can not find id by name because url includes None")
-    else:
-        p = {'marker': ''}
-        ids = set()
-        while True:
-            r = fetch_resource(session, link.format(**p))
-            if r is None:
-                break
-            r = r.get('vpcs', [])
-            if r == []:
-                break
-            for i in r:
-                if i.get('name') == name:
-                    ids.add(i.get('id'))
-            if len(ids) >= 2:
-                module.fail_json(
-                    msg="Multiple resources with same name are found")
+        if r == []:
+            break
+        for i in r:
+            if i.get('name') == v:
+                ids.add(i.get('id'))
+        if len(ids) >= 2:
+            module.fail_json(msg="Multiple resources are found")
 
-            p['marker'] = r[-1].get('id')
+        p['marker'] = r[-1].get('id')
 
-        return ids.pop() if ids else ""
+    return ids.pop() if ids else None
 
 
 @link_wrapper
@@ -333,11 +320,13 @@ def return_if_object(module, response, success_codes, has_content=True):
         module.fail_json(msg="Invalid JSON response with error: %s" % inst)
 
     if code not in success_codes:
-        msg = navigate_hash(result, ['message'])
-        if msg:
-            module.fail_json(msg=msg)
+        for i in [['message'], ['error', 'message']]:
+            msg = navigate_hash(result, i)
+            if msg:
+                module.fail_json(msg="request failed, %s" % msg)
+                break
         else:
-            module.fail_json(msg="operation failed, return code=%d" % code)
+            module.fail_json(msg="request failed, return code=%d" % code)
 
     return result
 
@@ -373,13 +362,11 @@ def resource_to_update(module):
     return {'vpc': request}
 
 
-def _get_editable_properties(module):
-    request = remove_nones_from_dict({
+def _get_resource_editable_properties(module):
+    return remove_nones_from_dict({
         "name": module.params.get("name"),
         "cidr": module.params.get("cidr"),
     })
-
-    return request
 
 
 # Remove unnecessary properties from the response.
@@ -396,16 +383,6 @@ def response_to_hash(module, response):
 
 
 @link_wrapper
-def resource_get_url(session, wait_done):
-    combined = session.module.params.copy()
-    combined['op_id'] = navigate_hash(wait_done, ['vpc', 'id'])
-    url = 'vpcs/{op_id}'.format(**combined)
-
-    endpoint = session.get_service_endpoint('vpc')
-    return endpoint + url
-
-
-@link_wrapper
 def async_op_url(session, extra_data=None):
     url = "{endpoint}vpcs/{op_id}"
 
@@ -418,27 +395,13 @@ def async_op_url(session, extra_data=None):
     return url.format(**combined)
 
 
-def wait_for_operation(session, op_type, op_result):
+def wait_for_operation(session, op_result, timeout, complete_states, allowed_states):
     op_id = navigate_hash(op_result, ['vpc', 'id'])
     url = async_op_url(session, {'op_id': op_id})
-    timeout = 60 * int(session.module.params['timeouts'][op_type].rstrip('m'))
-    states = {
-        'create': {
-            'allowed': ['CREATING', 'DONW', 'OK'],
-            'complete': ['OK'],
-        },
-        'update': {
-            'allowed': ['PENDING_UPDATE', 'DONW', 'OK'],
-            'complete': ['OK'],
-        }
-    }
-
-    return wait_for_completion(url, timeout, states[op_type]['allowed'],
-                               states[op_type]['complete'], session)
+    return wait_for_completion(session, url, timeout, complete_states, allowed_states)
 
 
-def wait_for_completion(op_uri, timeout, allowed_states,
-                        complete_states, session):
+def wait_for_completion(session, op_uri, timeout, complete_states, allowed_states):
     module = session.module
     end = time.time() + timeout
     while time.time() <= end:
@@ -448,28 +411,18 @@ def wait_for_completion(op_uri, timeout, allowed_states,
             time.sleep(1.0)
             continue
 
-        raise_if_errors(op_result, module)
-
         status = navigate_hash(op_result, ['vpc', 'status'])
         if status not in allowed_states:
             module.fail_json(msg="Invalid async operation status %s" % status)
         if status in complete_states:
             return op_result
-
         time.sleep(1.0)
 
     module.fail_json(msg="Timeout to wait completion")
 
 
-def raise_if_errors(response, module):
-    errors = navigate_hash(response, [])
-    if errors:
-        module.fail_json(msg=navigate_hash(response, []))
-
-
-def wait_for_delete(session, link):
-    end = time.time() + 60 * int(
-        session.module.params['timeouts']['delete'].rstrip('m'))
+def wait_for_delete(session, link, timeout):
+    end = time.time() + timeout
     while time.time() <= end:
         try:
             resp = session.get(link)
@@ -480,7 +433,7 @@ def wait_for_delete(session, link):
 
         time.sleep(1.0)
 
-    session.module.fail_json(msg="Timeout to wait for deletion to be complete")
+    session.module.fail_json(msg="Timeout to wait for deletion to be completed")
 
 
 class VpcRoutesArray(object):

@@ -76,7 +76,7 @@ class HwcSession(object):
         self.product = product
         self._validate()
         self._session = self._credentials()
-        self._adapter = Adapter(self._session, logger=self._init_log(log_file))
+        self._adapter = Adapter(self._session, logger=self._init_log())
         self._endpoints = {}
         self._project_id = ""
 
